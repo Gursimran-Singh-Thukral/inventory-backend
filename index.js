@@ -26,7 +26,7 @@ const transactionSchema = new mongoose.Schema({
   type: String, 
   itemName: String,
   quantity: Number,  
-  altQty: Number,    
+  altQty: mongoose.Schema.Types.Mixed, // Accepts String ("50 box") or Number (50)
   remarks: String,
   unit: String,
   altUnit: String,
@@ -41,9 +41,7 @@ const Transaction = mongoose.model('Transaction', transactionSchema);
 
 app.get('/', (req, res) => res.send("Backend is Running! 🚀"));
 
-// --- ROUTES ---
-
-// 1. GET ITEMS (DASHBOARD LOGIC)
+// --- GET ITEMS (INDEPENDENT CALCULATION) ---
 app.get('/api/items', async (req, res) => {
   try {
     const items = await Item.find().lean();
@@ -51,44 +49,37 @@ app.get('/api/items', async (req, res) => {
     const itemsWithQty = await Promise.all(items.map(async (item) => {
       const cleanName = item.name.trim();
       
-      // Find transactions
+      // Find transactions (Case Insensitive)
       const txns = await Transaction.find({ 
         itemName: { $regex: new RegExp(`^${cleanName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } 
       }).lean();
       
-      // 1. Calculate Primary Stock
+      // Independent Summation Loop
       const stats = txns.reduce((acc, t) => {
         const type = t.type ? t.type.toUpperCase().trim() : "IN";
-        const qty = Number(t.quantity) || 0;
-        const alt = Number(t.altQty) || 0;
+        
+        // 1. Primary Qty (Strict Number)
+        const qty = parseFloat(t.quantity) || 0;
+        
+        // 2. Alt Qty (Robust Parse: "50 box" -> 50)
+        // We use parseFloat because Number("50 box") returns NaN (0), but parseFloat("50 box") returns 50.
+        const rawAlt = t.altQty || 0;
+        const alt = parseFloat(String(rawAlt)) || 0;
 
         if (type === 'IN') {
           acc.primary += qty;
-          acc.altSum += alt; // Keep track of sum just in case
+          acc.alt += alt;
         } else {
           acc.primary -= qty;
-          acc.altSum -= alt;
+          acc.alt -= alt;
         }
         return acc;
-      }, { primary: 0, altSum: 0 });
-
-      // 2. CALCULATE DASHBOARD ALTERNATE QTY
-      // Logic: If the Item has a Factor, use (Primary * Factor).
-      //        If Manual/No Factor, use the Sum of history.
-      let finalAltQty = stats.altSum; 
-
-      if (item.factor && item.factor !== "Manual" && item.factor !== "-") {
-        const factor = parseFloat(item.factor);
-        if (!isNaN(factor)) {
-          // FOOLPROOF MATH: Total Stock * Factor
-          finalAltQty = stats.primary * factor;
-        }
-      }
+      }, { primary: 0, alt: 0 });
 
       return { 
         ...item, 
         quantity: stats.primary, 
-        altQuantity: finalAltQty, // Sends the calculated total
+        altQuantity: stats.alt, // Sends the independent sum
         id: item._id 
       };
     }));
@@ -99,41 +90,7 @@ app.get('/api/items', async (req, res) => {
   }
 });
 
-// 2. SAVE TRANSACTION (SERVER-SIDE CALCULATION)
-const calculateAltQty = async (txnBody) => {
-  if (txnBody.altQty && Number(txnBody.altQty) !== 0) return Number(txnBody.altQty);
-  
-  try {
-    const item = await Item.findOne({ name: txnBody.itemName });
-    if (item && item.factor && item.factor !== "Manual" && item.factor !== "-") {
-      const factor = parseFloat(item.factor);
-      const qty = parseFloat(txnBody.quantity) || 0;
-      if (!isNaN(factor)) return qty * factor;
-    }
-  } catch (e) { console.error(e); }
-  return 0;
-};
-
-app.post('/api/transactions', async (req, res) => {
-  try {
-    const payload = req.body;
-    payload.altQty = await calculateAltQty(payload); // Ensure saved correctly
-    const newTxn = new Transaction(payload);
-    const savedTxn = await newTxn.save();
-    res.json(savedTxn);
-  } catch (err) { res.status(400).json({ error: err.message }); }
-});
-
-app.put('/api/transactions/:id', async (req, res) => {
-  try {
-    const payload = req.body;
-    payload.altQty = await calculateAltQty(payload); // Ensure saved correctly
-    const updatedTxn = await Transaction.findByIdAndUpdate(req.params.id, payload, { new: true });
-    res.json(updatedTxn);
-  } catch (err) { res.status(400).json({ error: err.message }); }
-});
-
-// --- STANDARD CRUD ---
+// --- STANDARD CRUD ROUTES ---
 app.post('/api/items', async (req, res) => {
   try {
     const newItem = new Item(req.body);
@@ -166,6 +123,21 @@ app.get('/api/transactions', async (req, res) => {
     const txns = await Transaction.find().sort({ date: -1 });
     res.json(txns);
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/transactions', async (req, res) => {
+  try {
+    const newTxn = new Transaction(req.body);
+    const savedTxn = await newTxn.save();
+    res.json(savedTxn);
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+app.put('/api/transactions/:id', async (req, res) => {
+  try {
+    const updatedTxn = await Transaction.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    res.json(updatedTxn);
+  } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
 app.delete('/api/transactions/:id', async (req, res) => {
