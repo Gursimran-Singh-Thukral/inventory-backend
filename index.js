@@ -17,7 +17,7 @@ mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log("Connected to MongoDB"))
   .catch(err => console.error("MongoDB connection error:", err));
 
-// --- SCHEMAS ---
+// --- 1. DEFINING SCHEMAS (Strict Numbers) ---
 const itemSchema = new mongoose.Schema({
   name: String,
   unit: String,
@@ -26,17 +26,29 @@ const itemSchema = new mongoose.Schema({
   alertQty: Number
 });
 
-// --- CRITICAL UPDATE: altQty is defined as NUMBER ---
 const transactionSchema = new mongoose.Schema({
   date: String,
   type: String, 
   itemName: String,
-  quantity: Number,
-  altQty: Number, // Enforces numeric storage
+  quantity: Number,  // Primary (Number)
+  altQty: Number,    // Alternate (Strictly Number now)
   remarks: String,
   unit: String,
   altUnit: String,
   rate: Number
+});
+
+// Configure toJSON to handle ID conversion automatically
+transactionSchema.set('toJSON', {
+  virtuals: true,
+  versionKey: false,
+  transform: function (doc, ret) { ret.id = ret._id; delete ret._id; }
+});
+
+itemSchema.set('toJSON', {
+  virtuals: true,
+  versionKey: false,
+  transform: function (doc, ret) { ret.id = ret._id; delete ret._id; }
 });
 
 const Item = mongoose.model('Item', itemSchema);
@@ -44,54 +56,50 @@ const Transaction = mongoose.model('Transaction', transactionSchema);
 
 app.get('/', (req, res) => res.send("Backend is Running! 🚀"));
 
-// 1. GET ALL ITEMS (With Backup Calculation)
+// --- 2. GET ITEMS WITH ROBUST CALCULATION ---
 app.get('/api/items', async (req, res) => {
   try {
-    const items = await Item.find();
+    // .lean() converts Mongoose Documents to Plain JS Objects (Crucial for Math!)
+    const items = await Item.find().lean();
     
     const itemsWithQty = await Promise.all(items.map(async (item) => {
       const cleanName = item.name.trim();
 
-      // 1. Find Transactions (Fuzzy Search)
+      // Fuzzy Search: Find transactions ignoring Case & Spaces
+      // .lean() ensures we get raw numbers, not Mongoose objects
       const txns = await Transaction.find({ 
         itemName: { $regex: new RegExp(`^${cleanName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } 
-      });
+      }).lean();
       
-      // 2. Calculate Totals via Summation
       let stats = txns.reduce((acc, t) => {
         const type = t.type ? t.type.toUpperCase().trim() : "IN";
-        const qty = parseFloat(t.quantity) || 0;
         
-        // Clean Alt Qty string (remove letters)
-        let rawAlt = t.altQty || t.altQuantity || "0";
-        const cleanAlt = String(rawAlt).replace(/[^\d.-]/g, '');
-        const altVal = parseFloat(cleanAlt) || 0;
+        // Ensure values are numbers (Default to 0 if missing)
+        const qty = Number(t.quantity) || 0;
+        const alt = Number(t.altQty) || 0;
 
         if (type === 'IN') {
           acc.primary += qty;
-          acc.alt += altVal;
+          acc.alt += alt;
         } else {
           acc.primary -= qty;
-          acc.alt -= altVal;
+          acc.alt -= alt;
         }
         return acc;
       }, { primary: 0, alt: 0 });
 
-      // 3. --- BACKUP CALCULATION (THE FIX) ---
-      // If Alt Sum is 0, but we have stock, try to calc using the Item Factor
+      // --- BACKUP: Auto-Calculate if Alt is 0 but Factor exists ---
       if (stats.alt === 0 && stats.primary !== 0 && item.factor) {
         const factor = parseFloat(item.factor);
-        // Only calc if factor is a valid number (ignore "Manual")
-        if (!isNaN(factor)) {
-          console.log(`Auto-correcting Alt Qty for ${item.name}`);
+        if (!isNaN(factor) && item.factor !== "Manual") {
           stats.alt = stats.primary * factor;
         }
       }
 
       return { 
-        ...item._doc, 
+        ...item, // already lean object
         quantity: stats.primary, 
-        altQuantity: stats.alt, // Returns calculated backup if sum was 0
+        altQuantity: stats.alt, 
         id: item._id 
       };
     }));
@@ -102,13 +110,13 @@ app.get('/api/items', async (req, res) => {
   }
 });
 
-// --- CRUD ROUTES ---
+// --- CRUD ROUTES (Simplified) ---
 
 app.post('/api/items', async (req, res) => {
   try {
     const newItem = new Item(req.body);
     const savedItem = await newItem.save();
-    res.json({ ...savedItem._doc, id: savedItem._id, quantity: 0, altQuantity: 0 });
+    res.json(savedItem);
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
@@ -116,12 +124,10 @@ app.put('/api/items/:id', async (req, res) => {
   try {
     const oldItem = await Item.findById(req.params.id);
     const updatedItem = await Item.findByIdAndUpdate(req.params.id, req.body, { new: true });
-    
-    // Rename transactions if name changes
     if (oldItem && oldItem.name !== req.body.name) {
       await Transaction.updateMany({ itemName: oldItem.name }, { $set: { itemName: req.body.name } });
     }
-    res.json({ ...updatedItem._doc, id: updatedItem._id });
+    res.json(updatedItem);
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
@@ -139,7 +145,7 @@ app.delete('/api/items/:id', async (req, res) => {
 app.get('/api/transactions', async (req, res) => {
   try {
     const txns = await Transaction.find().sort({ date: -1 });
-    res.json(txns.map(t => ({ ...t._doc, id: t._id })));
+    res.json(txns);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -147,14 +153,14 @@ app.post('/api/transactions', async (req, res) => {
   try {
     const newTxn = new Transaction(req.body);
     const savedTxn = await newTxn.save();
-    res.json({ ...savedTxn._doc, id: savedTxn._id });
+    res.json(savedTxn);
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
 app.put('/api/transactions/:id', async (req, res) => {
   try {
     const updatedTxn = await Transaction.findByIdAndUpdate(req.params.id, req.body, { new: true });
-    res.json({ ...updatedTxn._doc, id: updatedTxn._id });
+    res.json(updatedTxn);
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
