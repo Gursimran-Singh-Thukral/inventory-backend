@@ -43,6 +43,11 @@ const transactionSchema = new mongoose.Schema({
 const Item = mongoose.model('Item', itemSchema);
 const Transaction = mongoose.model('Transaction', transactionSchema);
 
+// --- HEALTH CHECK ROUTE ---
+app.get('/', (req, res) => {
+  res.send("Backend is Running! 🚀");
+});
+
 // --- ROUTES ---
 
 // 1. GET ALL ITEMS (With Calculated Qty)
