@@ -50,33 +50,38 @@ app.get('/', (req, res) => {
 
 // --- ROUTES ---
 
-// 1. GET ALL ITEMS (Strict Calculation - No Dashes)
+// 1. GET ALL ITEMS (NaN-Proof Version)
 app.get('/api/items', async (req, res) => {
   try {
     const items = await Item.find();
     
     const itemsWithQty = await Promise.all(items.map(async (item) => {
-      // Find transactions matching this item name exactly
       const txns = await Transaction.find({ itemName: item.name });
       
       // 1. Calculate Primary Qty
       const qty = txns.reduce((acc, t) => {
-        return t.type === 'IN' ? acc + (t.quantity || 0) : acc - (t.quantity || 0);
+        const val = parseFloat(t.quantity);
+        const safeVal = isNaN(val) ? 0 : val;
+        return t.type === 'IN' ? acc + safeVal : acc - safeVal;
       }, 0);
 
-      // 2. Calculate Alternate Qty (Force Number Sum)
+      // 2. Calculate Alternate Qty (Double Safety Check)
       const totalAltQty = txns.reduce((acc, t) => {
-        // Handle cases where altQty might be a string like "50" or numbers
-        const val = parseFloat(t.altQty); 
+        // Force conversion to string, then parse float
+        const val = parseFloat(String(t.altQty)); 
+        // If parsing failed (NaN), treat as 0
         const safeVal = isNaN(val) ? 0 : val;
         
         return t.type === 'IN' ? acc + safeVal : acc - safeVal;
       }, 0);
 
+      // 3. Final Safety Net: If total is NaN, force 0
+      const finalAlt = isNaN(totalAltQty) ? 0 : totalAltQty;
+
       return { 
         ...item._doc, 
         quantity: qty, 
-        altQuantity: totalAltQty, // <--- SENDING RAW NUMBER (e.g., 50.5 or 0)
+        altQuantity: finalAlt, // Now guaranteed to be a valid number
         id: item._id 
       };
     }));
