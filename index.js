@@ -50,41 +50,38 @@ app.get('/', (req, res) => {
 
 // --- ROUTES ---
 
-// 1. GET ALL ITEMS (Smarter Calculation)
+// 1. GET ALL ITEMS (Simplified & Fixed)
 app.get('/api/items', async (req, res) => {
   try {
     const items = await Item.find();
     
     const itemsWithQty = await Promise.all(items.map(async (item) => {
+      // Trim name to ensure we match "Pipe" with "Pipe " (fixes mismatched spaces)
       const txns = await Transaction.find({ itemName: item.name });
       
-      // 1. Calculate Primary Quantity (IN - OUT)
+      // 1. Calculate Primary Quantity
       const qty = txns.reduce((acc, t) => {
         return t.type === 'IN' ? acc + (t.quantity || 0) : acc - (t.quantity || 0);
       }, 0);
 
-      // 2. Calculate Alternate Quantity (IN - OUT)
-      // We parse strictly to ensure we catch "50" or "50.5" but ignore garbage
+      // 2. Calculate Alternate Quantity
       const totalAltQty = txns.reduce((acc, t) => {
-        const raw = t.altQty ? t.altQty.toString() : "0";
-        const val = parseFloat(raw); 
+        // Convert to string first to handle nulls, then parse
+        const raw = t.altQty ? String(t.altQty) : "0";
+        const val = parseFloat(raw);
         const safeVal = isNaN(val) ? 0 : val;
         
         return t.type === 'IN' ? acc + safeVal : acc - safeVal;
       }, 0);
 
-      // 3. Display Logic: Show number if it exists (Not 0), OR if Item has an Alt Unit defined
-      let altDisplay = "-";
-      if (item.altUnit || totalAltQty !== 0) {
-        altDisplay = totalAltQty.toFixed(2);
-        // Remove trailing .00 for cleaner look (e.g. "50.00" -> "50")
-        if (altDisplay.endsWith('.00')) altDisplay = altDisplay.slice(0, -3);
-      }
+      // 3. Format the output (Always return the number, don't hide it!)
+      let altDisplay = totalAltQty.toFixed(2);
+      if (altDisplay.endsWith('.00')) altDisplay = altDisplay.slice(0, -3); // "50.00" -> "50"
 
       return { 
         ...item._doc, 
         quantity: qty, 
-        altQuantity: altDisplay, 
+        altQuantity: altDisplay, // We send "50" or "0", never "-"
         id: item._id 
       };
     }));
