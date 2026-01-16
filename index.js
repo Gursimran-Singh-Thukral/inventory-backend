@@ -1,11 +1,11 @@
 const express = require('express');
 const mongoose = require('mongoose');
-const cors = require('cors'); // <--- This is the key library
+const cors = require('cors'); // Required for connecting to Frontend
 require('dotenv').config();
 
 const app = express();
 
-// --- 1. ENABLE CORS FOR EVERYONE (FIXES THE ERROR) ---
+// --- 1. ENABLE CORS FOR EVERYONE (Crucial Fix) ---
 app.use(cors({
   origin: '*', 
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
@@ -55,7 +55,6 @@ app.get('/api/items', async (req, res) => {
   try {
     const items = await Item.find();
     
-    // Dynamic Calculation logic
     const itemsWithQty = await Promise.all(items.map(async (item) => {
       const txns = await Transaction.find({ itemName: item.name });
       
@@ -90,7 +89,7 @@ app.post('/api/items', async (req, res) => {
   try {
     const newItem = new Item(req.body);
     const savedItem = await newItem.save();
-    res.json({ ...savedItem._doc, id: savedItem._id, quantity: 0 });
+    res.json({ ...savedItem._doc, id: savedItem._id, quantity: 0, altQuantity: 0 });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
@@ -106,6 +105,7 @@ app.put('/api/items/:id', async (req, res) => {
     const updatedItem = await Item.findByIdAndUpdate(req.params.id, req.body, { new: true });
 
     if (oldName !== newName) {
+      console.log(`Renaming transactions from "${oldName}" to "${newName}"`);
       await Transaction.updateMany(
         { itemName: oldName },
         { $set: { itemName: newName } }
@@ -126,6 +126,8 @@ app.delete('/api/items/:id', async (req, res) => {
 
     await Item.findByIdAndDelete(req.params.id);
     await Transaction.deleteMany({ itemName: itemName });
+    
+    console.log(`Deleted Item "${itemName}" and all its transactions.`);
 
     res.json({ message: "Item and history deleted" });
   } catch (err) { res.status(500).json({ error: err.message }); }
