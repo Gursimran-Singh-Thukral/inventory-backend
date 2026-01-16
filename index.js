@@ -1,11 +1,10 @@
 const express = require('express');
 const mongoose = require('mongoose');
-const cors = require('cors'); // Required for connecting to Frontend
+const cors = require('cors');
 require('dotenv').config();
 
 const app = express();
 
-// --- 1. ENABLE CORS FOR EVERYONE (Crucial Fix) ---
 app.use(cors({
   origin: '*', 
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
@@ -14,7 +13,6 @@ app.use(cors({
 
 app.use(express.json());
 
-// --- MONGODB CONNECTION ---
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log("Connected to MongoDB"))
   .catch(err => console.error("MongoDB connection error:", err));
@@ -28,6 +26,7 @@ const itemSchema = new mongoose.Schema({
   alertQty: Number
 });
 
+// Note: altQty is String to handle formats, but we parse it as float for math
 const transactionSchema = new mongoose.Schema({
   date: String,
   type: String, 
@@ -43,41 +42,44 @@ const transactionSchema = new mongoose.Schema({
 const Item = mongoose.model('Item', itemSchema);
 const Transaction = mongoose.model('Transaction', transactionSchema);
 
-// --- HEALTH CHECK ROUTE ---
-app.get('/', (req, res) => {
-  res.send("Backend is Running! 🚀");
-});
+app.get('/', (req, res) => res.send("Backend is Running! 🚀"));
 
-// --- ROUTES ---
-
-// 1. GET ALL ITEMS (Strict Summation from Transactions)
+// --- MAIN ROUTE: GET ITEMS WITH CALCULATED TOTALS ---
 app.get('/api/items', async (req, res) => {
   try {
     const items = await Item.find();
     
     const itemsWithQty = await Promise.all(items.map(async (item) => {
-      // Find all transactions for this specific item
+      // Find transactions for this item
       const txns = await Transaction.find({ itemName: item.name });
       
-      // 1. Calculate Primary Qty (Sum of 'quantity' field)
-      const qty = txns.reduce((acc, t) => {
-        const val = parseFloat(t.quantity);
-        const safeVal = isNaN(val) ? 0 : val;
-        return t.type === 'IN' ? acc + safeVal : acc - safeVal;
-      }, 0);
+      // Calculate Totals
+      const stats = txns.reduce((acc, t) => {
+        // Normalize Type (handle "in", "IN", "In ")
+        const type = t.type ? t.type.toUpperCase().trim() : "IN";
+        
+        // Parse Primary Qty
+        const qty = parseFloat(t.quantity) || 0;
+        
+        // Parse Alt Qty (Handle "50", "50.5", null, "")
+        // We convert to string first to be safe, then parse
+        const rawAlt = t.altQty ? String(t.altQty) : "0";
+        const altQty = parseFloat(rawAlt) || 0;
 
-      // 2. Calculate Alternate Qty (Sum of 'altQty' field)
-      // EXACTLY the same logic: Get the number from the transaction, sum it up.
-      const totalAltQty = txns.reduce((acc, t) => {
-        const val = parseFloat(t.altQty); // Read directly from Transaction
-        const safeVal = isNaN(val) ? 0 : val; // If empty/invalid, assume 0
-        return t.type === 'IN' ? acc + safeVal : acc - safeVal;
-      }, 0);
+        if (type === 'IN') {
+          acc.primary += qty;
+          acc.alt += altQty;
+        } else {
+          acc.primary -= qty;
+          acc.alt -= altQty;
+        }
+        return acc;
+      }, { primary: 0, alt: 0 });
 
       return { 
         ...item._doc, 
-        quantity: qty, 
-        altQuantity: totalAltQty, // Send the exact sum
+        quantity: stats.primary, 
+        altQuantity: stats.alt, // Sending the raw number (e.g. 50 or 0)
         id: item._id 
       };
     }));
@@ -88,7 +90,8 @@ app.get('/api/items', async (req, res) => {
   }
 });
 
-// 2. ADD ITEM
+// --- STANDARD ROUTES (Create, Update, Delete) ---
+
 app.post('/api/items', async (req, res) => {
   try {
     const newItem = new Item(req.body);
@@ -97,47 +100,30 @@ app.post('/api/items', async (req, res) => {
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
-// 3. UPDATE ITEM (Cascading Rename)
 app.put('/api/items/:id', async (req, res) => {
   try {
     const oldItem = await Item.findById(req.params.id);
     if (!oldItem) return res.status(404).json({ error: "Item not found" });
-
-    const oldName = oldItem.name;
-    const newName = req.body.name;
-
     const updatedItem = await Item.findByIdAndUpdate(req.params.id, req.body, { new: true });
-
-    if (oldName !== newName) {
-      console.log(`Renaming transactions from "${oldName}" to "${newName}"`);
-      await Transaction.updateMany(
-        { itemName: oldName },
-        { $set: { itemName: newName } }
-      );
+    
+    // Cascading Rename
+    if (oldItem.name !== req.body.name) {
+      await Transaction.updateMany({ itemName: oldItem.name }, { $set: { itemName: req.body.name } });
     }
-
     res.json({ ...updatedItem._doc, id: updatedItem._id });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
-// 4. DELETE ITEM (Cascading Delete)
 app.delete('/api/items/:id', async (req, res) => {
   try {
     const item = await Item.findById(req.params.id);
     if (!item) return res.status(404).json({ error: "Item not found" });
-
-    const itemName = item.name;
-
     await Item.findByIdAndDelete(req.params.id);
-    await Transaction.deleteMany({ itemName: itemName });
-    
-    console.log(`Deleted Item "${itemName}" and all its transactions.`);
-
+    await Transaction.deleteMany({ itemName: item.name });
     res.json({ message: "Item and history deleted" });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// --- TRANSACTION ROUTES ---
 app.get('/api/transactions', async (req, res) => {
   try {
     const txns = await Transaction.find().sort({ date: -1 });
@@ -167,7 +153,6 @@ app.delete('/api/transactions/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// LOGIN MOCK
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body;
   if (username === 'admin' && password === '123') res.json({ role: 'admin' });
