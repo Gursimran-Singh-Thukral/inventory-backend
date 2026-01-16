@@ -26,13 +26,13 @@ const itemSchema = new mongoose.Schema({
   alertQty: Number
 });
 
-// --- CRITICAL CHANGE: altQty is now a NUMBER ---
+// --- CRITICAL UPDATE: altQty is defined as NUMBER ---
 const transactionSchema = new mongoose.Schema({
   date: String,
   type: String, 
   itemName: String,
-  quantity: Number,  // Primary Qty (Number)
-  altQty: Number,    // Alternate Qty (NOW A NUMBER)
+  quantity: Number,
+  altQty: Number, // Enforces numeric storage
   remarks: String,
   unit: String,
   altUnit: String,
@@ -44,23 +44,22 @@ const Transaction = mongoose.model('Transaction', transactionSchema);
 
 app.get('/', (req, res) => res.send("Backend is Running! 🚀"));
 
-// --- MAIN ROUTE: GET ITEMS WITH CALCULATED TOTALS ---
+// --- GET ITEMS + CALCULATE TOTALS ---
 app.get('/api/items', async (req, res) => {
   try {
     const items = await Item.find();
     
     const itemsWithQty = await Promise.all(items.map(async (item) => {
+      // Fuzzy Search logic to find transactions even if case/space mismatches
       const cleanName = item.name.trim();
-
-      // Find transactions (Case Insensitive)
       const txns = await Transaction.find({ 
-        itemName: { $regex: new RegExp(`^${cleanName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+        itemName: { $regex: new RegExp(`^${cleanName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } 
       });
       
       const stats = txns.reduce((acc, t) => {
         const type = t.type ? t.type.toUpperCase().trim() : "IN";
         
-        // SIMPLE MATH (Because they are now Numbers)
+        // Simple Math (No string parsing needed anymore)
         const qty = t.quantity || 0;
         const alt = t.altQty || 0;
 
@@ -88,7 +87,7 @@ app.get('/api/items', async (req, res) => {
   }
 });
 
-// --- STANDARD ROUTES ---
+// --- CRUD ROUTES ---
 
 app.post('/api/items', async (req, res) => {
   try {
@@ -103,7 +102,7 @@ app.put('/api/items/:id', async (req, res) => {
     const oldItem = await Item.findById(req.params.id);
     const updatedItem = await Item.findByIdAndUpdate(req.params.id, req.body, { new: true });
     
-    // Rename transactions if item name changed
+    // Rename transactions if name changes
     if (oldItem && oldItem.name !== req.body.name) {
       await Transaction.updateMany({ itemName: oldItem.name }, { $set: { itemName: req.body.name } });
     }
@@ -151,7 +150,6 @@ app.delete('/api/transactions/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// LOGIN MOCK
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body;
   if (username === 'admin' && password === '123') res.json({ role: 'admin' });
