@@ -50,7 +50,7 @@ app.get('/', (req, res) => {
 
 // --- ROUTES ---
 
-// 1. GET ALL ITEMS (NaN-Proof Version)
+// 1. GET ALL ITEMS (Self-Healing Logic)
 app.get('/api/items', async (req, res) => {
   try {
     const items = await Item.find();
@@ -58,30 +58,34 @@ app.get('/api/items', async (req, res) => {
     const itemsWithQty = await Promise.all(items.map(async (item) => {
       const txns = await Transaction.find({ itemName: item.name });
       
+      // Get conversion factor if it exists (e.g., "12" or "1000")
+      const factor = (item.factor && item.factor !== "Manual" && item.factor !== "-") 
+        ? parseFloat(item.factor) 
+        : null;
+
       // 1. Calculate Primary Qty
       const qty = txns.reduce((acc, t) => {
-        const val = parseFloat(t.quantity);
-        const safeVal = isNaN(val) ? 0 : val;
-        return t.type === 'IN' ? acc + safeVal : acc - safeVal;
+        const val = parseFloat(t.quantity) || 0;
+        return t.type === 'IN' ? acc + val : acc - val;
       }, 0);
 
-      // 2. Calculate Alternate Qty (Double Safety Check)
+      // 2. Calculate Alternate Qty (With Self-Healing)
       const totalAltQty = txns.reduce((acc, t) => {
-        // Force conversion to string, then parse float
-        const val = parseFloat(String(t.altQty)); 
-        // If parsing failed (NaN), treat as 0
+        let val = parseFloat(t.altQty);
+
+        // SELF-HEALING: If altQty is missing/0, but we have a Factor & Primary Qty, calculate it now!
+        if ((isNaN(val) || val === 0) && factor !== null && t.quantity) {
+          val = parseFloat(t.quantity) * factor;
+        }
+
         const safeVal = isNaN(val) ? 0 : val;
-        
         return t.type === 'IN' ? acc + safeVal : acc - safeVal;
       }, 0);
-
-      // 3. Final Safety Net: If total is NaN, force 0
-      const finalAlt = isNaN(totalAltQty) ? 0 : totalAltQty;
 
       return { 
         ...item._doc, 
         quantity: qty, 
-        altQuantity: finalAlt, // Now guaranteed to be a valid number
+        altQuantity: totalAltQty, // Now includes auto-calculated values
         id: item._id 
       };
     }));
