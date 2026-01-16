@@ -26,13 +26,13 @@ const itemSchema = new mongoose.Schema({
   alertQty: Number
 });
 
-// Note: altQty is String to handle formats, but we parse it as float for math
+// --- CRITICAL CHANGE: altQty is now a NUMBER ---
 const transactionSchema = new mongoose.Schema({
   date: String,
   type: String, 
   itemName: String,
-  quantity: Number,
-  altQty: String,
+  quantity: Number,  // Primary Qty (Number)
+  altQty: Number,    // Alternate Qty (NOW A NUMBER)
   remarks: String,
   unit: String,
   altUnit: String,
@@ -45,39 +45,31 @@ const Transaction = mongoose.model('Transaction', transactionSchema);
 app.get('/', (req, res) => res.send("Backend is Running! 🚀"));
 
 // --- MAIN ROUTE: GET ITEMS WITH CALCULATED TOTALS ---
-// 1. GET ALL ITEMS (Fuzzy Search & Strict Math)
 app.get('/api/items', async (req, res) => {
   try {
     const items = await Item.find();
     
     const itemsWithQty = await Promise.all(items.map(async (item) => {
-      // 1. Clean the name (Remove extra spaces)
       const cleanName = item.name.trim();
 
-      // 2. Fuzzy Search: Find transactions matching name, ignoring Case & Spaces
-      // ^ and $ ensure it matches the full phrase, 'i' ignores case
+      // Find transactions (Case Insensitive)
       const txns = await Transaction.find({ 
         itemName: { $regex: new RegExp(`^${cleanName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
       });
       
-      // 3. Strict Calculation
       const stats = txns.reduce((acc, t) => {
-        // Normalize Type
         const type = t.type ? t.type.toUpperCase().trim() : "IN";
         
-        // Force Quantity to Number
-        const qty = parseFloat(t.quantity) || 0;
-        
-        // Force Alt Qty to Number (Strip non-numeric characters if any exist)
-        let rawAlt = t.altQty ? String(t.altQty) : "0";
-        const altQty = parseFloat(rawAlt) || 0;
+        // SIMPLE MATH (Because they are now Numbers)
+        const qty = t.quantity || 0;
+        const alt = t.altQty || 0;
 
         if (type === 'IN') {
           acc.primary += qty;
-          acc.alt += altQty;
+          acc.alt += alt;
         } else {
           acc.primary -= qty;
-          acc.alt -= altQty;
+          acc.alt -= alt;
         }
         return acc;
       }, { primary: 0, alt: 0 });
@@ -85,7 +77,7 @@ app.get('/api/items', async (req, res) => {
       return { 
         ...item._doc, 
         quantity: stats.primary, 
-        altQuantity: stats.alt, // Will return actual number (e.g. 50)
+        altQuantity: stats.alt, 
         id: item._id 
       };
     }));
@@ -96,7 +88,7 @@ app.get('/api/items', async (req, res) => {
   }
 });
 
-// --- STANDARD ROUTES (Create, Update, Delete) ---
+// --- STANDARD ROUTES ---
 
 app.post('/api/items', async (req, res) => {
   try {
@@ -109,11 +101,10 @@ app.post('/api/items', async (req, res) => {
 app.put('/api/items/:id', async (req, res) => {
   try {
     const oldItem = await Item.findById(req.params.id);
-    if (!oldItem) return res.status(404).json({ error: "Item not found" });
     const updatedItem = await Item.findByIdAndUpdate(req.params.id, req.body, { new: true });
     
-    // Cascading Rename
-    if (oldItem.name !== req.body.name) {
+    // Rename transactions if item name changed
+    if (oldItem && oldItem.name !== req.body.name) {
       await Transaction.updateMany({ itemName: oldItem.name }, { $set: { itemName: req.body.name } });
     }
     res.json({ ...updatedItem._doc, id: updatedItem._id });
@@ -123,9 +114,10 @@ app.put('/api/items/:id', async (req, res) => {
 app.delete('/api/items/:id', async (req, res) => {
   try {
     const item = await Item.findById(req.params.id);
-    if (!item) return res.status(404).json({ error: "Item not found" });
-    await Item.findByIdAndDelete(req.params.id);
-    await Transaction.deleteMany({ itemName: item.name });
+    if (item) {
+      await Transaction.deleteMany({ itemName: item.name });
+      await Item.findByIdAndDelete(req.params.id);
+    }
     res.json({ message: "Item and history deleted" });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -159,6 +151,7 @@ app.delete('/api/transactions/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// LOGIN MOCK
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body;
   if (username === 'admin' && password === '123') res.json({ role: 'admin' });
