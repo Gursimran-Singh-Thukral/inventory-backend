@@ -50,7 +50,7 @@ app.get('/', (req, res) => {
 
 // --- ROUTES ---
 
-// 1. GET ALL ITEMS (With Calculated Qty)
+// 1. GET ALL ITEMS (Fixed: Sums Alt Qty directly from transactions)
 app.get('/api/items', async (req, res) => {
   try {
     const items = await Item.find();
@@ -58,22 +58,28 @@ app.get('/api/items', async (req, res) => {
     const itemsWithQty = await Promise.all(items.map(async (item) => {
       const txns = await Transaction.find({ itemName: item.name });
       
+      // Calculate Primary Qty
       const qty = txns.reduce((acc, t) => {
         return t.type === 'IN' ? acc + t.quantity : acc - t.quantity;
       }, 0);
 
-      let altQtyRemaining = "-";
-      if (item.altUnit && item.factor && item.factor !== "Manual" && item.factor !== "-") {
-        const factor = parseFloat(item.factor);
-        if (!isNaN(factor)) {
-          altQtyRemaining = (qty * factor).toFixed(2); 
-        }
+      // Calculate Alternate Qty (Summing directly instead of converting)
+      const totalAltQty = txns.reduce((acc, t) => {
+        const val = parseFloat(t.altQty) || 0;
+        return t.type === 'IN' ? acc + val : acc - val;
+      }, 0);
+
+      // Determine what to display for Alt Qty
+      let altDisplay = "-";
+      if (item.altUnit) {
+        // If an alt unit exists, show the sum (rounded to 2 decimals)
+        altDisplay = totalAltQty.toFixed(2);
       }
 
       return { 
         ...item._doc, 
         quantity: qty, 
-        altQuantity: altQtyRemaining, 
+        altQuantity: altDisplay, // Sending the real sum now
         id: item._id 
       };
     }));
