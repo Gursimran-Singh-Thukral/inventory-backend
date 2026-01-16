@@ -50,38 +50,33 @@ app.get('/', (req, res) => {
 
 // --- ROUTES ---
 
-// 1. GET ALL ITEMS (Simplified & Fixed)
+// 1. GET ALL ITEMS (Strict Calculation - No Dashes)
 app.get('/api/items', async (req, res) => {
   try {
     const items = await Item.find();
     
     const itemsWithQty = await Promise.all(items.map(async (item) => {
-      // Trim name to ensure we match "Pipe" with "Pipe " (fixes mismatched spaces)
+      // Find transactions matching this item name exactly
       const txns = await Transaction.find({ itemName: item.name });
       
-      // 1. Calculate Primary Quantity
+      // 1. Calculate Primary Qty
       const qty = txns.reduce((acc, t) => {
         return t.type === 'IN' ? acc + (t.quantity || 0) : acc - (t.quantity || 0);
       }, 0);
 
-      // 2. Calculate Alternate Quantity
+      // 2. Calculate Alternate Qty (Force Number Sum)
       const totalAltQty = txns.reduce((acc, t) => {
-        // Convert to string first to handle nulls, then parse
-        const raw = t.altQty ? String(t.altQty) : "0";
-        const val = parseFloat(raw);
+        // Handle cases where altQty might be a string like "50" or numbers
+        const val = parseFloat(t.altQty); 
         const safeVal = isNaN(val) ? 0 : val;
         
         return t.type === 'IN' ? acc + safeVal : acc - safeVal;
       }, 0);
 
-      // 3. Format the output (Always return the number, don't hide it!)
-      let altDisplay = totalAltQty.toFixed(2);
-      if (altDisplay.endsWith('.00')) altDisplay = altDisplay.slice(0, -3); // "50.00" -> "50"
-
       return { 
         ...item._doc, 
         quantity: qty, 
-        altQuantity: altDisplay, // We send "50" or "0", never "-"
+        altQuantity: totalAltQty, // <--- SENDING RAW NUMBER (e.g., 50.5 or 0)
         id: item._id 
       };
     }));
