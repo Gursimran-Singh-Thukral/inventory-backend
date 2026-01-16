@@ -45,25 +45,31 @@ const Transaction = mongoose.model('Transaction', transactionSchema);
 app.get('/', (req, res) => res.send("Backend is Running! 🚀"));
 
 // --- MAIN ROUTE: GET ITEMS WITH CALCULATED TOTALS ---
+// 1. GET ALL ITEMS (Fuzzy Search & Strict Math)
 app.get('/api/items', async (req, res) => {
   try {
     const items = await Item.find();
     
     const itemsWithQty = await Promise.all(items.map(async (item) => {
-      // Find transactions for this item
-      const txns = await Transaction.find({ itemName: item.name });
+      // 1. Clean the name (Remove extra spaces)
+      const cleanName = item.name.trim();
+
+      // 2. Fuzzy Search: Find transactions matching name, ignoring Case & Spaces
+      // ^ and $ ensure it matches the full phrase, 'i' ignores case
+      const txns = await Transaction.find({ 
+        itemName: { $regex: new RegExp(`^${cleanName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+      });
       
-      // Calculate Totals
+      // 3. Strict Calculation
       const stats = txns.reduce((acc, t) => {
-        // Normalize Type (handle "in", "IN", "In ")
+        // Normalize Type
         const type = t.type ? t.type.toUpperCase().trim() : "IN";
         
-        // Parse Primary Qty
+        // Force Quantity to Number
         const qty = parseFloat(t.quantity) || 0;
         
-        // Parse Alt Qty (Handle "50", "50.5", null, "")
-        // We convert to string first to be safe, then parse
-        const rawAlt = t.altQty ? String(t.altQty) : "0";
+        // Force Alt Qty to Number (Strip non-numeric characters if any exist)
+        let rawAlt = t.altQty ? String(t.altQty) : "0";
         const altQty = parseFloat(rawAlt) || 0;
 
         if (type === 'IN') {
@@ -79,7 +85,7 @@ app.get('/api/items', async (req, res) => {
       return { 
         ...item._doc, 
         quantity: stats.primary, 
-        altQuantity: stats.alt, // Sending the raw number (e.g. 50 or 0)
+        altQuantity: stats.alt, // Will return actual number (e.g. 50)
         id: item._id 
       };
     }));
