@@ -1,11 +1,18 @@
 const express = require('express');
 const mongoose = require('mongoose');
-const cors = require('cors');
+const cors = require('cors'); // <--- This is the key library
 require('dotenv').config();
 
 const app = express();
+
+// --- 1. ENABLE CORS FOR EVERYONE (FIXES THE ERROR) ---
+app.use(cors({
+  origin: '*', 
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 app.use(express.json());
-app.use(cors());
 
 // --- MONGODB CONNECTION ---
 mongoose.connect(process.env.MONGO_URI)
@@ -38,27 +45,42 @@ const Transaction = mongoose.model('Transaction', transactionSchema);
 
 // --- ROUTES ---
 
-// GET ALL ITEMS
+// 1. GET ALL ITEMS (With Calculated Qty)
 app.get('/api/items', async (req, res) => {
   try {
     const items = await Item.find();
+    
+    // Dynamic Calculation logic
     const itemsWithQty = await Promise.all(items.map(async (item) => {
       const txns = await Transaction.find({ itemName: item.name });
-      const qty = txns.reduce((acc, t) => t.type === 'IN' ? acc + t.quantity : acc - t.quantity, 0);
       
+      const qty = txns.reduce((acc, t) => {
+        return t.type === 'IN' ? acc + t.quantity : acc - t.quantity;
+      }, 0);
+
       let altQtyRemaining = "-";
       if (item.altUnit && item.factor && item.factor !== "Manual" && item.factor !== "-") {
         const factor = parseFloat(item.factor);
-        if (!isNaN(factor)) altQtyRemaining = (qty * factor).toFixed(2);
+        if (!isNaN(factor)) {
+          altQtyRemaining = (qty * factor).toFixed(2); 
+        }
       }
 
-      return { ...item._doc, quantity: qty, altQuantity: altQtyRemaining, id: item._id };
+      return { 
+        ...item._doc, 
+        quantity: qty, 
+        altQuantity: altQtyRemaining, 
+        id: item._id 
+      };
     }));
+
     res.json(itemsWithQty);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// ADD ITEM
+// 2. ADD ITEM
 app.post('/api/items', async (req, res) => {
   try {
     const newItem = new Item(req.body);
@@ -67,22 +89,18 @@ app.post('/api/items', async (req, res) => {
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
-// --- CRITICAL FIX: CASCADING UPDATE ---
+// 3. UPDATE ITEM (Cascading Rename)
 app.put('/api/items/:id', async (req, res) => {
   try {
-    // 1. Find the OLD name before updating
     const oldItem = await Item.findById(req.params.id);
     if (!oldItem) return res.status(404).json({ error: "Item not found" });
 
     const oldName = oldItem.name;
     const newName = req.body.name;
 
-    // 2. Update the Item
     const updatedItem = await Item.findByIdAndUpdate(req.params.id, req.body, { new: true });
 
-    // 3. If name changed, update ALL transactions immediately
     if (oldName !== newName) {
-      console.log(`Renaming transactions from "${oldName}" to "${newName}"`);
       await Transaction.updateMany(
         { itemName: oldName },
         { $set: { itemName: newName } }
@@ -93,27 +111,22 @@ app.put('/api/items/:id', async (req, res) => {
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
-// --- CRITICAL FIX: CASCADING DELETE ---
+// 4. DELETE ITEM (Cascading Delete)
 app.delete('/api/items/:id', async (req, res) => {
   try {
-    // 1. Find the item to get its name
     const item = await Item.findById(req.params.id);
     if (!item) return res.status(404).json({ error: "Item not found" });
 
     const itemName = item.name;
 
-    // 2. Delete the Item
     await Item.findByIdAndDelete(req.params.id);
-
-    // 3. Delete ALL transactions with this item name
-    const result = await Transaction.deleteMany({ itemName: itemName });
-    console.log(`Deleted Item: "${itemName}" and ${result.deletedCount} related transactions.`);
+    await Transaction.deleteMany({ itemName: itemName });
 
     res.json({ message: "Item and history deleted" });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// TRANSACTION ROUTES
+// --- TRANSACTION ROUTES ---
 app.get('/api/transactions', async (req, res) => {
   try {
     const txns = await Transaction.find().sort({ date: -1 });
@@ -143,7 +156,7 @@ app.delete('/api/transactions/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// LOGIN
+// LOGIN MOCK
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body;
   if (username === 'admin' && password === '123') res.json({ role: 'admin' });
