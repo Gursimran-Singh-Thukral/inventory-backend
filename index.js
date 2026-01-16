@@ -30,7 +30,7 @@ const transactionSchema = new mongoose.Schema({
   remarks: String,
   unit: String,
   altUnit: String,
-  rate: Number // <--- NEW: Purchase Rate
+  rate: Number
 });
 
 const Item = mongoose.model('Item', itemSchema);
@@ -38,84 +38,86 @@ const Transaction = mongoose.model('Transaction', transactionSchema);
 
 // --- ROUTES ---
 
-// GET ALL ITEMS (With Calculated Quantities)
+// GET ALL ITEMS
 app.get('/api/items', async (req, res) => {
   try {
     const items = await Item.find();
-    
-    // Calculate Current Quantity & Alternate Quantity dynamically
     const itemsWithQty = await Promise.all(items.map(async (item) => {
       const txns = await Transaction.find({ itemName: item.name });
+      const qty = txns.reduce((acc, t) => t.type === 'IN' ? acc + t.quantity : acc - t.quantity, 0);
       
-      const qty = txns.reduce((acc, t) => {
-        return t.type === 'IN' ? acc + t.quantity : acc - t.quantity;
-      }, 0);
-
-      // Calculate Alt Qty Remaining
       let altQtyRemaining = "-";
       if (item.altUnit && item.factor && item.factor !== "Manual" && item.factor !== "-") {
         const factor = parseFloat(item.factor);
-        if (!isNaN(factor)) {
-          altQtyRemaining = (qty * factor).toFixed(2); 
-        }
+        if (!isNaN(factor)) altQtyRemaining = (qty * factor).toFixed(2);
       }
 
-      return { 
-        ...item._doc, 
-        quantity: qty, 
-        altQuantity: altQtyRemaining, // <--- NEW FIELD
-        id: item._id 
-      };
+      return { ...item._doc, quantity: qty, altQuantity: altQtyRemaining, id: item._id };
     }));
-
     res.json(itemsWithQty);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ... (KEEP THE REST OF THE ROUTES EXACTLY AS BEFORE: POST, PUT, DELETE for Items & Transactions, Login) ...
-// Copy the previous POST/PUT/DELETE routes here.
-// I will include the standardized routes below for safety to ensure nothing breaks.
-
+// ADD ITEM
 app.post('/api/items', async (req, res) => {
   try {
     const newItem = new Item(req.body);
     const savedItem = await newItem.save();
-    res.json({ ...savedItem._doc, id: savedItem._id, quantity: 0, altQuantity: 0 });
+    res.json({ ...savedItem._doc, id: savedItem._id, quantity: 0 });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
+// --- CRITICAL FIX: CASCADING UPDATE ---
 app.put('/api/items/:id', async (req, res) => {
   try {
+    // 1. Find the OLD name before updating
     const oldItem = await Item.findById(req.params.id);
     if (!oldItem) return res.status(404).json({ error: "Item not found" });
+
     const oldName = oldItem.name;
     const newName = req.body.name;
+
+    // 2. Update the Item
     const updatedItem = await Item.findByIdAndUpdate(req.params.id, req.body, { new: true });
+
+    // 3. If name changed, update ALL transactions immediately
     if (oldName !== newName) {
-      await Transaction.updateMany({ itemName: oldName }, { $set: { itemName: newName } });
+      console.log(`Renaming transactions from "${oldName}" to "${newName}"`);
+      await Transaction.updateMany(
+        { itemName: oldName },
+        { $set: { itemName: newName } }
+      );
     }
+
     res.json({ ...updatedItem._doc, id: updatedItem._id });
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
+// --- CRITICAL FIX: CASCADING DELETE ---
 app.delete('/api/items/:id', async (req, res) => {
   try {
+    // 1. Find the item to get its name
     const item = await Item.findById(req.params.id);
     if (!item) return res.status(404).json({ error: "Item not found" });
+
     const itemName = item.name;
+
+    // 2. Delete the Item
     await Item.findByIdAndDelete(req.params.id);
-    await Transaction.deleteMany({ itemName: itemName });
+
+    // 3. Delete ALL transactions with this item name
+    const result = await Transaction.deleteMany({ itemName: itemName });
+    console.log(`Deleted Item: "${itemName}" and ${result.deletedCount} related transactions.`);
+
     res.json({ message: "Item and history deleted" });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// TRANSACTION ROUTES
 app.get('/api/transactions', async (req, res) => {
   try {
     const txns = await Transaction.find().sort({ date: -1 });
-    const formattedTxns = txns.map(t => ({ ...t._doc, id: t._id }));
-    res.json(formattedTxns);
+    res.json(txns.map(t => ({ ...t._doc, id: t._id })));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -141,15 +143,12 @@ app.delete('/api/transactions/:id', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// LOGIN
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body;
-  if (username === 'admin' && password === '123') {
-    res.json({ role: 'admin', token: 'fake-jwt-token' });
-  } else if (username === 'staff' && password === '123') {
-    res.json({ role: 'staff', token: 'fake-jwt-token-staff' });
-  } else {
-    res.status(401).json({ message: 'Invalid credentials' });
-  }
+  if (username === 'admin' && password === '123') res.json({ role: 'admin' });
+  else if (username === 'staff' && password === '123') res.json({ role: 'staff' });
+  else res.status(401).json({ message: 'Invalid credentials' });
 });
 
 const PORT = process.env.PORT || 5000;
