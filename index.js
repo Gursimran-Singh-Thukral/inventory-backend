@@ -5,19 +5,14 @@ require('dotenv').config();
 
 const app = express();
 
-app.use(cors({
-  origin: '*', 
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
-
+app.use(cors({ origin: '*', methods: ['GET', 'POST', 'PUT', 'DELETE'], allowedHeaders: ['Content-Type', 'Authorization'] }));
 app.use(express.json());
 
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log("Connected to MongoDB"))
   .catch(err => console.error("MongoDB connection error:", err));
 
-// --- 1. DEFINING SCHEMAS (Strict Numbers) ---
+// --- SCHEMAS ---
 const itemSchema = new mongoose.Schema({
   name: String,
   unit: String,
@@ -30,51 +25,63 @@ const transactionSchema = new mongoose.Schema({
   date: String,
   type: String, 
   itemName: String,
-  quantity: Number,  // Primary (Number)
-  altQty: Number,    // Alternate (Strictly Number now)
+  quantity: Number,  
+  altQty: Number,    
   remarks: String,
   unit: String,
   altUnit: String,
   rate: Number
 });
 
-// Configure toJSON to handle ID conversion automatically
-transactionSchema.set('toJSON', {
-  virtuals: true,
-  versionKey: false,
-  transform: function (doc, ret) { ret.id = ret._id; delete ret._id; }
-});
-
-itemSchema.set('toJSON', {
-  virtuals: true,
-  versionKey: false,
-  transform: function (doc, ret) { ret.id = ret._id; delete ret._id; }
-});
+transactionSchema.set('toJSON', { virtuals: true, versionKey: false, transform: function (doc, ret) { ret.id = ret._id; delete ret._id; } });
+itemSchema.set('toJSON', { virtuals: true, versionKey: false, transform: function (doc, ret) { ret.id = ret._id; delete ret._id; } });
 
 const Item = mongoose.model('Item', itemSchema);
 const Transaction = mongoose.model('Transaction', transactionSchema);
 
 app.get('/', (req, res) => res.send("Backend is Running! 🚀"));
 
-// --- 2. GET ITEMS WITH ROBUST CALCULATION ---
+// --- HELPER: CALCULATE ALT QTY ---
+// This function runs on the server to ensure math is always correct
+const calculateAltQty = async (txnBody) => {
+  // If user provided a specific Alt Qty (and it's not 0), trust them.
+  if (txnBody.altQty && parseFloat(txnBody.altQty) !== 0) {
+    return parseFloat(txnBody.altQty);
+  }
+
+  // Otherwise, calculate it using the Item's factor
+  try {
+    const item = await Item.findOne({ name: txnBody.itemName });
+    if (item && item.factor && item.factor !== "Manual" && item.factor !== "-") {
+      const factor = parseFloat(item.factor);
+      const qty = parseFloat(txnBody.quantity) || 0;
+      if (!isNaN(factor) && !isNaN(qty)) {
+        console.log(`Server Auto-Calc: ${qty} * ${factor} = ${qty * factor}`);
+        return qty * factor;
+      }
+    }
+  } catch (e) {
+    console.error("Auto-calc failed:", e);
+  }
+  return 0; // Default to 0 if fails
+};
+
+// --- ROUTES ---
+
+// GET ITEMS (With Aggregation)
 app.get('/api/items', async (req, res) => {
   try {
-    // .lean() converts Mongoose Documents to Plain JS Objects (Crucial for Math!)
     const items = await Item.find().lean();
     
     const itemsWithQty = await Promise.all(items.map(async (item) => {
       const cleanName = item.name.trim();
-
-      // Fuzzy Search: Find transactions ignoring Case & Spaces
-      // .lean() ensures we get raw numbers, not Mongoose objects
+      // Fuzzy Search
       const txns = await Transaction.find({ 
         itemName: { $regex: new RegExp(`^${cleanName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } 
       }).lean();
       
-      let stats = txns.reduce((acc, t) => {
+      const stats = txns.reduce((acc, t) => {
         const type = t.type ? t.type.toUpperCase().trim() : "IN";
-        
-        // Ensure values are numbers (Default to 0 if missing)
         const qty = Number(t.quantity) || 0;
         const alt = Number(t.altQty) || 0;
 
@@ -88,16 +95,8 @@ app.get('/api/items', async (req, res) => {
         return acc;
       }, { primary: 0, alt: 0 });
 
-      // --- BACKUP: Auto-Calculate if Alt is 0 but Factor exists ---
-      if (stats.alt === 0 && stats.primary !== 0 && item.factor) {
-        const factor = parseFloat(item.factor);
-        if (!isNaN(factor) && item.factor !== "Manual") {
-          stats.alt = stats.primary * factor;
-        }
-      }
-
       return { 
-        ...item, // already lean object
+        ...item, 
         quantity: stats.primary, 
         altQuantity: stats.alt, 
         id: item._id 
@@ -110,8 +109,6 @@ app.get('/api/items', async (req, res) => {
   }
 });
 
-// --- CRUD ROUTES (Simplified) ---
-
 app.post('/api/items', async (req, res) => {
   try {
     const newItem = new Item(req.body);
@@ -122,11 +119,9 @@ app.post('/api/items', async (req, res) => {
 
 app.put('/api/items/:id', async (req, res) => {
   try {
-    const oldItem = await Item.findById(req.params.id);
     const updatedItem = await Item.findByIdAndUpdate(req.params.id, req.body, { new: true });
-    if (oldItem && oldItem.name !== req.body.name) {
-      await Transaction.updateMany({ itemName: oldItem.name }, { $set: { itemName: req.body.name } });
-    }
+    // Update Transaction Names
+    await Transaction.updateMany({ itemName: req.body.name }, { $set: { itemName: req.body.name } });
     res.json(updatedItem);
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
@@ -138,7 +133,7 @@ app.delete('/api/items/:id', async (req, res) => {
       await Transaction.deleteMany({ itemName: item.name });
       await Item.findByIdAndDelete(req.params.id);
     }
-    res.json({ message: "Item and history deleted" });
+    res.json({ message: "Deleted" });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -149,17 +144,27 @@ app.get('/api/transactions', async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// POST TRANSACTION (With Server-Side Auto Calc)
 app.post('/api/transactions', async (req, res) => {
   try {
-    const newTxn = new Transaction(req.body);
+    const payload = req.body;
+    // Force Calculation on Server Side
+    payload.altQty = await calculateAltQty(payload);
+    
+    const newTxn = new Transaction(payload);
     const savedTxn = await newTxn.save();
     res.json(savedTxn);
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
+// PUT TRANSACTION (With Server-Side Auto Calc)
 app.put('/api/transactions/:id', async (req, res) => {
   try {
-    const updatedTxn = await Transaction.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    const payload = req.body;
+    // Force Calculation on Server Side
+    payload.altQty = await calculateAltQty(payload);
+
+    const updatedTxn = await Transaction.findByIdAndUpdate(req.params.id, payload, { new: true });
     res.json(updatedTxn);
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
@@ -167,15 +172,14 @@ app.put('/api/transactions/:id', async (req, res) => {
 app.delete('/api/transactions/:id', async (req, res) => {
   try {
     await Transaction.findByIdAndDelete(req.params.id);
-    res.json({ message: "Transaction deleted" });
+    res.json({ message: "Deleted" });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body;
   if (username === 'admin' && password === '123') res.json({ role: 'admin' });
-  else if (username === 'staff' && password === '123') res.json({ role: 'staff' });
-  else res.status(401).json({ message: 'Invalid credentials' });
+  else res.status(401).json({ message: 'Invalid' });
 });
 
 const PORT = process.env.PORT || 5000;
