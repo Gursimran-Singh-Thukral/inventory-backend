@@ -50,42 +50,34 @@ app.get('/', (req, res) => {
 
 // --- ROUTES ---
 
-// 1. GET ALL ITEMS (Self-Healing Logic)
+// 1. GET ALL ITEMS (Strict Summation from Transactions)
 app.get('/api/items', async (req, res) => {
   try {
     const items = await Item.find();
     
     const itemsWithQty = await Promise.all(items.map(async (item) => {
+      // Find all transactions for this specific item
       const txns = await Transaction.find({ itemName: item.name });
       
-      // Get conversion factor if it exists (e.g., "12" or "1000")
-      const factor = (item.factor && item.factor !== "Manual" && item.factor !== "-") 
-        ? parseFloat(item.factor) 
-        : null;
-
-      // 1. Calculate Primary Qty
+      // 1. Calculate Primary Qty (Sum of 'quantity' field)
       const qty = txns.reduce((acc, t) => {
-        const val = parseFloat(t.quantity) || 0;
-        return t.type === 'IN' ? acc + val : acc - val;
+        const val = parseFloat(t.quantity);
+        const safeVal = isNaN(val) ? 0 : val;
+        return t.type === 'IN' ? acc + safeVal : acc - safeVal;
       }, 0);
 
-      // 2. Calculate Alternate Qty (With Self-Healing)
+      // 2. Calculate Alternate Qty (Sum of 'altQty' field)
+      // EXACTLY the same logic: Get the number from the transaction, sum it up.
       const totalAltQty = txns.reduce((acc, t) => {
-        let val = parseFloat(t.altQty);
-
-        // SELF-HEALING: If altQty is missing/0, but we have a Factor & Primary Qty, calculate it now!
-        if ((isNaN(val) || val === 0) && factor !== null && t.quantity) {
-          val = parseFloat(t.quantity) * factor;
-        }
-
-        const safeVal = isNaN(val) ? 0 : val;
+        const val = parseFloat(t.altQty); // Read directly from Transaction
+        const safeVal = isNaN(val) ? 0 : val; // If empty/invalid, assume 0
         return t.type === 'IN' ? acc + safeVal : acc - safeVal;
       }, 0);
 
       return { 
         ...item._doc, 
         quantity: qty, 
-        altQuantity: totalAltQty, // Now includes auto-calculated values
+        altQuantity: totalAltQty, // Send the exact sum
         id: item._id 
       };
     }));
