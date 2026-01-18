@@ -3,7 +3,6 @@ import mongoose from 'mongoose';
 import cors from 'cors';
 import dotenv from 'dotenv';
 
-// Initialize dotenv
 dotenv.config();
 
 const app = express();
@@ -11,7 +10,6 @@ const app = express();
 app.use(cors({ origin: '*', methods: ['GET', 'POST', 'PUT', 'DELETE'], allowedHeaders: ['Content-Type', 'Authorization'] }));
 app.use(express.json());
 
-// Connect to MongoDB
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log("Connected to MongoDB"))
   .catch(err => console.error("MongoDB connection error:", err));
@@ -37,38 +35,41 @@ const transactionSchema = new mongoose.Schema({
   rate: Number
 });
 
-// Configure JSON transformation
 transactionSchema.set('toJSON', { virtuals: true, versionKey: false, transform: function (doc, ret) { ret.id = ret._id; delete ret._id; } });
 itemSchema.set('toJSON', { virtuals: true, versionKey: false, transform: function (doc, ret) { ret.id = ret._id; delete ret._id; } });
 
-// Create Models
 const Item = mongoose.model('Item', itemSchema);
 const Transaction = mongoose.model('Transaction', transactionSchema);
 
-// --- ROUTES ---
-
-// Health Check
 app.get('/', (req, res) => res.send("Backend is Running! 🚀"));
 
-// 1. GET ITEMS (Independent Calculation Logic)
+// --- OPTIMIZED GET ITEMS ---
 app.get('/api/items', async (req, res) => {
   try {
+    // 1. Fetch ALL Items (One Query)
     const items = await Item.find().lean();
     
-    const itemsWithQty = await Promise.all(items.map(async (item) => {
-      const cleanName = item.name.trim();
+    // 2. Fetch ALL Transactions (One Query) - Huge Performance Boost
+    const allTxns = await Transaction.find().lean();
+
+    // 3. Map transactions for faster lookup (Optimization)
+    // We create a "Dictionary" where keys are Item Names (lowercase)
+    const txnMap = {};
+    allTxns.forEach(t => {
+      const key = t.itemName.trim().toLowerCase();
+      if (!txnMap[key]) txnMap[key] = [];
+      txnMap[key].push(t);
+    });
+
+    // 4. Calculate stats in memory (No more DB calls in loop)
+    const itemsWithQty = items.map(item => {
+      const cleanName = item.name.trim().toLowerCase();
+      const itemTxns = txnMap[cleanName] || []; // Instant lookup
       
-      // Fuzzy Search for Transactions
-      const txns = await Transaction.find({ 
-        itemName: { $regex: new RegExp(`^${cleanName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } 
-      }).lean();
-      
-      // Calculate Sums
-      const stats = txns.reduce((acc, t) => {
+      const stats = itemTxns.reduce((acc, t) => {
         const type = t.type ? t.type.toUpperCase().trim() : "IN";
         const qty = Number(t.quantity) || 0;
         
-        // Parse Alt Qty Aggressively
         let rawAlt = t.altQty || 0;
         let cleanAlt = String(rawAlt).replace(/[^0-9.]/g, "");
         let altVal = parseFloat(cleanAlt) || 0;
@@ -89,7 +90,7 @@ app.get('/api/items', async (req, res) => {
         altQuantity: stats.alt, 
         id: item._id 
       };
-    }));
+    });
 
     res.json(itemsWithQty);
   } catch (err) {
@@ -98,7 +99,6 @@ app.get('/api/items', async (req, res) => {
 });
 
 // --- CRUD API ---
-
 app.post('/api/items', async (req, res) => {
   try {
     const newItem = new Item(req.body);
@@ -110,7 +110,6 @@ app.post('/api/items', async (req, res) => {
 app.put('/api/items/:id', async (req, res) => {
   try {
     const updatedItem = await Item.findByIdAndUpdate(req.params.id, req.body, { new: true });
-    // Update linked transactions if name changes
     if (updatedItem) {
         await Transaction.updateMany({ itemName: req.body.name }, { $set: { itemName: req.body.name } });
     }
