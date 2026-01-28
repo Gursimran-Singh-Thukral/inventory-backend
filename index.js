@@ -35,7 +35,7 @@ const transactionSchema = new mongoose.Schema({
   rate: Number
 });
 
-// Helper for standard queries (Non-lean)
+// JSON Helpers
 transactionSchema.set('toJSON', { virtuals: true, versionKey: false, transform: function (doc, ret) { ret.id = ret._id; delete ret._id; } });
 itemSchema.set('toJSON', { virtuals: true, versionKey: false, transform: function (doc, ret) { ret.id = ret._id; delete ret._id; } });
 
@@ -44,24 +44,29 @@ const Transaction = mongoose.model('Transaction', transactionSchema);
 
 app.get('/', (req, res) => res.send("Backend is Running! 🚀"));
 
-// --- OPTIMIZED GET ITEMS (With ID Fix) ---
+// --- ULTRA-LIGHT GET ITEMS ---
 app.get('/api/items', async (req, res) => {
   try {
-    // 1. Fetch Raw Data (Lean = Fast, but returns _id)
-    const items = await Item.find().lean();
-    const allTxns = await Transaction.find().lean();
+    // 1. Fetch Items (Lean + Select only needed fields)
+    // We only need the info to display, not internal version keys
+    const items = await Item.find().select('name unit altUnit factor alertQty').lean();
+    
+    // 2. Fetch Transactions (THE DIET FIX)
+    // ONLY fetch 'itemName', 'type', 'quantity', 'altQty'. Ignore remarks/dates/rates.
+    // This reduces memory usage massively.
+    const allTxns = await Transaction.find({}, 'itemName type quantity altQty').lean();
 
-    // 2. Map Transactions for O(1) Lookup
+    // 3. Map for Speed
     const txnMap = {};
-    allTxns.forEach(t => {
-      // Safe guard against missing names
-      const name = t.itemName ? t.itemName.toString() : ""; 
-      const key = name.trim().toLowerCase();
-      if (!txnMap[key]) txnMap[key] = [];
-      txnMap[key].push(t);
-    });
+    for (const t of allTxns) {
+      if (t.itemName) {
+        const key = t.itemName.toString().trim().toLowerCase();
+        if (!txnMap[key]) txnMap[key] = [];
+        txnMap[key].push(t);
+      }
+    }
 
-    // 3. Match and Calculate
+    // 4. Calculate
     const itemsWithQty = items.map(item => {
       const name = item.name ? item.name.toString() : "";
       const cleanName = name.trim().toLowerCase();
@@ -89,14 +94,14 @@ app.get('/api/items', async (req, res) => {
         ...item, 
         quantity: stats.primary, 
         altQuantity: stats.alt, 
-        id: item._id // <--- CRITICAL FIX: Manually mapping _id to id
+        id: item._id.toString() // <--- FORCE ID TO STRING (Fixes "Missing ID" bug)
       };
     });
 
     res.json(itemsWithQty);
   } catch (err) {
-    console.error("GET Error:", err); // Log error to Render console
-    res.status(500).json({ error: err.message });
+    console.error("CRITICAL GET ERROR:", err);
+    res.status(500).json({ error: "Server Error", details: err.message });
   }
 });
 
@@ -114,7 +119,8 @@ app.put('/api/items/:id', async (req, res) => {
   try {
     const updatedItem = await Item.findByIdAndUpdate(req.params.id, req.body, { new: true });
     if (updatedItem) {
-        await Transaction.updateMany({ itemName: req.body.name }, { $set: { itemName: req.body.name } });
+        // Run this in background so we don't block the response
+        Transaction.updateMany({ itemName: req.body.name }, { $set: { itemName: req.body.name } }).catch(console.error);
     }
     res.json(updatedItem);
   } catch (err) { res.status(400).json({ error: err.message }); }
@@ -133,7 +139,8 @@ app.delete('/api/items/:id', async (req, res) => {
 
 app.get('/api/transactions', async (req, res) => {
   try {
-    const txns = await Transaction.find().sort({ date: -1 });
+    // Limit transaction history load to 500 most recent to prevent dashboard lag
+    const txns = await Transaction.find().sort({ date: -1 }).limit(500);
     res.json(txns);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
