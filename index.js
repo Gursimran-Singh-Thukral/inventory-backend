@@ -35,6 +35,7 @@ const transactionSchema = new mongoose.Schema({
   rate: Number
 });
 
+// Helper for standard queries (Non-lean)
 transactionSchema.set('toJSON', { virtuals: true, versionKey: false, transform: function (doc, ret) { ret.id = ret._id; delete ret._id; } });
 itemSchema.set('toJSON', { virtuals: true, versionKey: false, transform: function (doc, ret) { ret.id = ret._id; delete ret._id; } });
 
@@ -43,28 +44,28 @@ const Transaction = mongoose.model('Transaction', transactionSchema);
 
 app.get('/', (req, res) => res.send("Backend is Running! 🚀"));
 
-// --- OPTIMIZED GET ITEMS ---
+// --- OPTIMIZED GET ITEMS (With ID Fix) ---
 app.get('/api/items', async (req, res) => {
   try {
-    // 1. Fetch ALL Items (One Query)
+    // 1. Fetch Raw Data (Lean = Fast, but returns _id)
     const items = await Item.find().lean();
-    
-    // 2. Fetch ALL Transactions (One Query) - Huge Performance Boost
     const allTxns = await Transaction.find().lean();
 
-    // 3. Map transactions for faster lookup (Optimization)
-    // We create a "Dictionary" where keys are Item Names (lowercase)
+    // 2. Map Transactions for O(1) Lookup
     const txnMap = {};
     allTxns.forEach(t => {
-      const key = t.itemName.trim().toLowerCase();
+      // Safe guard against missing names
+      const name = t.itemName ? t.itemName.toString() : ""; 
+      const key = name.trim().toLowerCase();
       if (!txnMap[key]) txnMap[key] = [];
       txnMap[key].push(t);
     });
 
-    // 4. Calculate stats in memory (No more DB calls in loop)
+    // 3. Match and Calculate
     const itemsWithQty = items.map(item => {
-      const cleanName = item.name.trim().toLowerCase();
-      const itemTxns = txnMap[cleanName] || []; // Instant lookup
+      const name = item.name ? item.name.toString() : "";
+      const cleanName = name.trim().toLowerCase();
+      const itemTxns = txnMap[cleanName] || [];
       
       const stats = itemTxns.reduce((acc, t) => {
         const type = t.type ? t.type.toUpperCase().trim() : "IN";
@@ -88,17 +89,19 @@ app.get('/api/items', async (req, res) => {
         ...item, 
         quantity: stats.primary, 
         altQuantity: stats.alt, 
-        id: item._id 
+        id: item._id // <--- CRITICAL FIX: Manually mapping _id to id
       };
     });
 
     res.json(itemsWithQty);
   } catch (err) {
+    console.error("GET Error:", err); // Log error to Render console
     res.status(500).json({ error: err.message });
   }
 });
 
 // --- CRUD API ---
+
 app.post('/api/items', async (req, res) => {
   try {
     const newItem = new Item(req.body);
