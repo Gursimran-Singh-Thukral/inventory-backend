@@ -44,57 +44,61 @@ const Transaction = mongoose.model('Transaction', transactionSchema);
 
 app.get('/', (req, res) => res.send("Backend is Running! 🚀"));
 
-// --- ULTRA-LIGHT GET ITEMS ---
+// --- ULTRA-OPTIMIZED GET ITEMS ---
 app.get('/api/items', async (req, res) => {
   try {
-    // 1. Fetch Items (Lean + Select only needed fields)
-    // We only need the info to display, not internal version keys
+    // 1. Fetch Items
     const items = await Item.find().select('name unit altUnit factor alertQty').lean();
     
-    // 2. Fetch Transactions (THE DIET FIX)
-    // ONLY fetch 'itemName', 'type', 'quantity', 'altQty'. Ignore remarks/dates/rates.
-    // This reduces memory usage massively.
+    // 2. Fetch Transactions (Only needed fields)
     const allTxns = await Transaction.find({}, 'itemName type quantity altQty').lean();
 
-    // 3. Map for Speed
-    const txnMap = {};
+    // 3. CALCULATE RUNNING TOTALS (Zero Memory Overhead)
+    // Instead of storing transactions, we just store the totals in a dictionary.
+    const stockMap = {}; 
+
     for (const t of allTxns) {
-      if (t.itemName) {
-        const key = t.itemName.toString().trim().toLowerCase();
-        if (!txnMap[key]) txnMap[key] = [];
-        txnMap[key].push(t);
+      if (!t.itemName) continue;
+      
+      const key = t.itemName.toString().trim().toLowerCase();
+      
+      // Initialize if not exists
+      if (!stockMap[key]) {
+        stockMap[key] = { primary: 0, alt: 0 };
       }
+
+      const type = t.type ? t.type.toUpperCase().trim() : "IN";
+      const qty = Number(t.quantity) || 0;
+        
+      // Parse Alt Qty
+      let rawAlt = t.altQty || 0;
+      let cleanAlt = String(rawAlt).replace(/[^0-9.]/g, "");
+      let altVal = parseFloat(cleanAlt) || 0;
+
+      // Update Running Total immediately
+      if (type === 'IN') {
+        stockMap[key].primary += qty;
+        stockMap[key].alt += altVal;
+      } else {
+        stockMap[key].primary -= qty;
+        stockMap[key].alt -= altVal;
+      }
+      // Note: We do NOT push 't' to an array. We discard it.
     }
 
-    // 4. Calculate
+    // 4. Merge Totals into Items
     const itemsWithQty = items.map(item => {
       const name = item.name ? item.name.toString() : "";
       const cleanName = name.trim().toLowerCase();
-      const itemTxns = txnMap[cleanName] || [];
       
-      const stats = itemTxns.reduce((acc, t) => {
-        const type = t.type ? t.type.toUpperCase().trim() : "IN";
-        const qty = Number(t.quantity) || 0;
-        
-        let rawAlt = t.altQty || 0;
-        let cleanAlt = String(rawAlt).replace(/[^0-9.]/g, "");
-        let altVal = parseFloat(cleanAlt) || 0;
-
-        if (type === 'IN') {
-          acc.primary += qty;
-          acc.alt += altVal;
-        } else {
-          acc.primary -= qty;
-          acc.alt -= altVal;
-        }
-        return acc;
-      }, { primary: 0, alt: 0 });
+      // Look up the pre-calculated total
+      const stats = stockMap[cleanName] || { primary: 0, alt: 0 };
 
       return { 
         ...item, 
         quantity: stats.primary, 
         altQuantity: stats.alt, 
-        id: item._id.toString() // <--- FORCE ID TO STRING (Fixes "Missing ID" bug)
+        id: item._id.toString()
       };
     });
 
@@ -119,7 +123,6 @@ app.put('/api/items/:id', async (req, res) => {
   try {
     const updatedItem = await Item.findByIdAndUpdate(req.params.id, req.body, { new: true });
     if (updatedItem) {
-        // Run this in background so we don't block the response
         Transaction.updateMany({ itemName: req.body.name }, { $set: { itemName: req.body.name } }).catch(console.error);
     }
     res.json(updatedItem);
@@ -139,8 +142,8 @@ app.delete('/api/items/:id', async (req, res) => {
 
 app.get('/api/transactions', async (req, res) => {
   try {
-    // Limit transaction history load to 500 most recent to prevent dashboard lag
-    const txns = await Transaction.find().sort({ date: -1 }).limit(500);
+    // Limit history to 200 to ensure fast load times
+    const txns = await Transaction.find().sort({ date: -1 }).limit(200);
     res.json(txns);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
