@@ -23,10 +23,11 @@ const itemSchema = new mongoose.Schema({
   alertQty: Number
 });
 
+// Added index for faster sorting
 const transactionSchema = new mongoose.Schema({
   date: String,
   type: String, 
-  itemName: String,
+  itemName: { type: String, index: true }, 
   quantity: Number,  
   altQty: mongoose.Schema.Types.Mixed,
   remarks: String,
@@ -44,38 +45,36 @@ const Transaction = mongoose.model('Transaction', transactionSchema);
 
 app.get('/', (req, res) => res.send("Backend is Running! 🚀"));
 
-// --- ULTRA-OPTIMIZED GET ITEMS ---
+// --- STREAMING GET ITEMS (ZERO RAM USAGE) ---
 app.get('/api/items', async (req, res) => {
   try {
-    // 1. Fetch Items
+    // 1. Fetch Items (Fast)
     const items = await Item.find().select('name unit altUnit factor alertQty').lean();
     
-    // 2. Fetch Transactions (Only needed fields)
-    const allTxns = await Transaction.find({}, 'itemName type quantity altQty').lean();
-
-    // 3. CALCULATE RUNNING TOTALS (Zero Memory Overhead)
-    // Instead of storing transactions, we just store the totals in a dictionary.
+    // 2. Prepare the Map
     const stockMap = {}; 
+    
+    // 3. STREAM Transactions (One by One)
+    // This cursor acts like a stream. It never loads the full list into RAM.
+    const cursor = Transaction.find({}, 'itemName type quantity altQty').cursor();
 
-    for (const t of allTxns) {
+    for (let t = await cursor.next(); t != null; t = await cursor.next()) {
       if (!t.itemName) continue;
-      
+
       const key = t.itemName.toString().trim().toLowerCase();
       
-      // Initialize if not exists
       if (!stockMap[key]) {
         stockMap[key] = { primary: 0, alt: 0 };
       }
 
       const type = t.type ? t.type.toUpperCase().trim() : "IN";
       const qty = Number(t.quantity) || 0;
-        
+      
       // Parse Alt Qty
       let rawAlt = t.altQty || 0;
-      let cleanAlt = String(rawAlt).replace(/[^0-9.]/g, "");
-      let altVal = parseFloat(cleanAlt) || 0;
+      // Simple parse to avoid RegEx overhead on every row if possible
+      let altVal = typeof rawAlt === 'number' ? rawAlt : parseFloat(String(rawAlt).replace(/[^0-9.]/g, "")) || 0;
 
-      // Update Running Total immediately
       if (type === 'IN') {
         stockMap[key].primary += qty;
         stockMap[key].alt += altVal;
@@ -83,15 +82,12 @@ app.get('/api/items', async (req, res) => {
         stockMap[key].primary -= qty;
         stockMap[key].alt -= altVal;
       }
-      // Note: We do NOT push 't' to an array. We discard it.
     }
 
-    // 4. Merge Totals into Items
+    // 4. Merge results
     const itemsWithQty = items.map(item => {
       const name = item.name ? item.name.toString() : "";
       const cleanName = name.trim().toLowerCase();
-      
-      // Look up the pre-calculated total
       const stats = stockMap[cleanName] || { primary: 0, alt: 0 };
 
       return { 
@@ -104,8 +100,8 @@ app.get('/api/items', async (req, res) => {
 
     res.json(itemsWithQty);
   } catch (err) {
-    console.error("CRITICAL GET ERROR:", err);
-    res.status(500).json({ error: "Server Error", details: err.message });
+    console.error("STREAM ERROR:", err);
+    res.status(500).json({ error: "Server Error" });
   }
 });
 
@@ -122,9 +118,8 @@ app.post('/api/items', async (req, res) => {
 app.put('/api/items/:id', async (req, res) => {
   try {
     const updatedItem = await Item.findByIdAndUpdate(req.params.id, req.body, { new: true });
-    if (updatedItem) {
-        Transaction.updateMany({ itemName: req.body.name }, { $set: { itemName: req.body.name } }).catch(console.error);
-    }
+    // Update background
+    if (updatedItem) Transaction.updateMany({ itemName: req.body.name }, { $set: { itemName: req.body.name } }).catch(() => {});
     res.json(updatedItem);
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
@@ -142,7 +137,6 @@ app.delete('/api/items/:id', async (req, res) => {
 
 app.get('/api/transactions', async (req, res) => {
   try {
-    // Limit history to 200 to ensure fast load times
     const txns = await Transaction.find().sort({ date: -1 }).limit(200);
     res.json(txns);
   } catch (err) { res.status(500).json({ error: err.message }); }
